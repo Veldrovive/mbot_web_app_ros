@@ -48,14 +48,6 @@ var config = {
         FULL_SLAM: 3,
         IDLE: 99,
     },
-
-    // MBot Channels.
-    POSE_CHANNEL: "SLAM_POSE",
-    LIDAR_CHANNEL: "LIDAR",
-    PARTICLE_CHANNEL: "SLAM_PARTICLES",
-    PATH_CHANNEL: "CONTROLLER_PATH",
-    SLAM_MODE_CHANNEL: "SLAM_STATUS",
-    SLAM_MAP_CHANNEL: "SLAM_MAP",
 };
 
 export default config;

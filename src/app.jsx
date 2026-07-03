@@ -110,47 +110,30 @@ function ToggleSelect({ small, label, explain, checked, onChange, isActive = tru
   );
 }
 
-function SLAMControlPanel({ slamMode, onLocalizationMode, onMappingMode, onResetMap, saveMap }) {
-  const isActive = (slamMode !== config.slam_mode.IDLE) && (slamMode !== config.slam_mode.INVALID);
+function SLAMControlPanel({ onResetMap, saveMap }) {
   return (
     <>
-      <ToggleSelect
-        label={"Localization Mode"}
-        explain={"Toggles localization mode and displays map."}
-        checked={isActive}
-        onChange={onLocalizationMode}
-      />
-      {isActive &&
-        <div className="subpanel">
-          <ToggleSelect
-            label={"Mapping Mode"}
-            checked={slamMode === config.slam_mode.FULL_SLAM}
-            explain={"Toggles mapping mode on the robot."}
-            onChange={onMappingMode}
-            small={true}
-          />
-          <div className="button-wrapper-col">
-            <button
-              className={"button" + (slamMode !== config.slam_mode.FULL_SLAM ? " inactive" : "")}
-              onClick={onResetMap}
-            >
-              Reset Map
-            </button>
-            <button
-              className="button"
-              onClick={saveMap}
-            >
-              Download Map
-            </button>
-          </div>
+      <div className="subpanel">
+        <div className="button-wrapper-col">
+          <button
+            className="button"
+            onClick={onResetMap}
+          >
+            Reset Map
+          </button>
+          <button
+            className="button"
+            onClick={saveMap}
+          >
+            Download Map
+          </button>
         </div>
-      }
+      </div>
     </>
   );
 }
 
-function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, laserDisplay, particleDisplay, mapDisplay,
-                            poseAvailable, laserAvailable, mapAvailable, particlesAvailable, slamModeAvailable,
+function MBotSceneWrapper({ mbot, scene, connected, robotDisplay, laserDisplay, mapDisplay,
                             setClickedCell, setRobotPose, setRobotCell}) {
   // Ref for the canvas.
   const canvasWrapperRef = useRef(null);
@@ -167,7 +150,7 @@ function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, lase
     const clickedCell = [...scene.current.pixelsToCell(pos[0], pos[1]),
                          ...scene.current.pixelsToPos(pos[0], pos[1])];
     setClickedCell(clickedCell);
-  }, [setClickedCell]);
+  }, [setClickedCell, scene]);
 
   // Initialization of the scene.
   useEffect(() => {
@@ -181,41 +164,40 @@ function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, lase
     return () => {
       // Clean up.
     }
-  }, [canvasWrapperRef, handleCanvasClick]);
+  }, [canvasWrapperRef, handleCanvasClick, scene]);
 
   // Effect to manage subscribing to the pose.
   useEffect(() => {
     if (scene.current.loaded) scene.current.toggleRobotView(robotDisplay);
 
-    if (connected && robotDisplay && poseAvailable) {
-      mbot.subscribe(config.POSE_CHANNEL, (msg) => {
+    let unsubscribe = null;
+    if (connected && robotDisplay) {
+      unsubscribe = mbot.readOdom((msg) => {
         // Sets the robot position
-        setRobotPose({x: msg.data.x, y: msg.data.y, theta: msg.data.theta});
+        setRobotPose({x: msg.x, y: msg.y, theta: msg.theta});
         if (!scene.current.loaded) return;
-        scene.current.updateRobot(msg.data.x, msg.data.y, msg.data.theta);
+        scene.current.updateRobot(msg.x, msg.y, msg.theta);
         if (scene.current.isMapLoaded()) {
-          const robotCell = scene.current.posToCell(msg.data.x, msg.data.y);
+          const robotCell = scene.current.posToCell(msg.x, msg.y);
           setRobotCell(robotCell);
         }
-      }).catch((error) => {
-        console.warn('Subscription failed for channel', config.POSE_CHANNEL, error);
       });
     }
 
     // Return the cleanup function which stops the rerender.
     return () => {
-      if (connected) mbot.unsubscribe(config.POSE_CHANNEL).catch((err) => console.warn(err));
+      if (unsubscribe) unsubscribe();
     }
-  }, [connected, robotDisplay, poseAvailable, setRobotPose, setRobotCell]);
+  }, [connected, robotDisplay, setRobotPose, setRobotCell, mbot, scene]);
 
   // Effect to manage subscribing to the Lidar.
   useEffect(() => {
-    if (connected && laserDisplay && laserAvailable) {
-      mbot.subscribe(config.LIDAR_CHANNEL, (msg) => {
+    let unsubscribe = null;
+    if (connected && laserDisplay) {
+      unsubscribe = mbot.readScan((msg) => {
         if (!scene.current.loaded) return;
-        scene.current.drawLasers(msg.data.ranges, msg.data.thetas);
-      }).catch((error) => {
-        console.warn('Subscription failed for channel', config.LIDAR_CHANNEL, error);
+        const thetas = msg.ranges.map((_, i) => msg.getAngle(i));
+        scene.current.drawLasers(msg.ranges, thetas);
       });
     }
     else {
@@ -224,134 +206,63 @@ function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, lase
 
     // Return the cleanup function which stops the rerender.
     return () => {
-      if (connected) mbot.unsubscribe(config.LIDAR_CHANNEL).catch((err) => console.warn(err));
+      if (unsubscribe) unsubscribe();
     }
-  }, [connected, laserAvailable, laserDisplay]);
-
-  // Effect to manage subscribing to the SLAM particles.
-  useEffect(() => {
-    if (connected && particleDisplay && particlesAvailable) {
-      mbot.subscribe(config.PARTICLE_CHANNEL, (msg) => {
-        if (!scene.current.loaded) return;
-        // Extract the particles into points.
-        const particleList = msg.data.particles;
-        const points = particleList.map(item => [item.pose.x, item.pose.y]);
-        // Draw the particles.
-        scene.current.drawParticles(points);
-      }).catch((error) => {
-        console.warn('Subscription failed for channel', config.PARTICLE_CHANNEL, error);
-      });
-    }
-    else {
-      if (scene.current.loaded) scene.current.clearParticles();
-    }
-
-    // Return the cleanup function which stops the rerender.
-    return () => {
-      if (connected) mbot.unsubscribe(config.PARTICLE_CHANNEL).catch((err) => console.warn(err));
-    }
-  }, [connected, particleDisplay, particlesAvailable]);
+  }, [connected, laserDisplay, mbot, scene]);
 
   // Effect to manage subscribing to the path.
   useEffect(() => {
+    let unsubscribe = null;
     if (connected) {
-      mbot.subscribe(config.PATH_CHANNEL, (msg) => {
+      unsubscribe = mbot.readPath((msg) => {
         if (!scene.current.loaded) return;
-        const pathPoints = msg.data.path;
+        const pathPoints = msg.poses;
         if (pathPoints.length === 0) {
           scene.current.clearPath();  // If path length is zero, clear and return.
         }
         else {
           // Extract coordinates of the path and draw.
-          const points = pathPoints.map(item => [item.x, item.y]);
+          const points = pathPoints.map(item => [item.pose.position.x, item.pose.position.y]);
           scene.current.drawPath(points);
         }
-      }).catch((error) => {
-        console.warn('Subscription failed for channel', config.PATH_CHANNEL, error);
       });
     }
 
     // Return the cleanup function which stops the rerender.
     return () => {
-      if (connected) mbot.unsubscribe(config.PATH_CHANNEL).catch((err) => console.warn(err));
+      if (unsubscribe) unsubscribe();
     }
-  }, [connected]);
+  }, [connected, mbot, scene]);
 
   // Effect to request the SLAM map.
   useEffect(() => {
-    let timerId = null;
-    let mapRequestCount = 0;
-
-    async function requestSLAMMap() {
-      try {
-        const data = await mbot.readMap();
-        const headerData = {
-          width: data.width,
-          height: data.height,
-          metersPerCell: data.meters_per_cell,
-          origin: data.origin
-        };
-
-        if (scene.current.loaded) {
-          scene.current.setMapHeaderData(data.width, data.height, data.meters_per_cell, data.origin);
-          scene.current.updateCells(data.cells);
-        }
-
-        mapRequestCount = 0;  // If the map was retrieved, reset the fail count.
-        return headerData;
-      } catch (error) {
-        mapRequestCount++;  // Keep track of how many failed map requests we have made.
-        return null;
-      }
-    }
+    let unsubscribe = null;
 
     if (scene.current.loaded) {
       scene.current.clear();  // Clear the scene on change.
     }
 
-    // If we are making a map OR there is no SLAM mode but the user has
-    // requested to visualize the map, request the map at a regular interval.
-    // If the request fails, after a timeout period the request will stop.
-    if ((!slamModeAvailable && mapDisplay) ||
-        slamMode === config.slam_mode.FULL_SLAM ||
-        slamMode === config.slam_mode.MAPPING_ONLY){
-      // Check for map once right away.
-      requestSLAMMap();
-      // Check for map intermittently.
-      timerId = setInterval(() => { requestSLAMMap().then((val) => {
-        if (mapRequestCount > config.STALE_MAP_COUNT) {
-          // Timeout condition. Give up full SLAM mode and reset.
-          console.warn("No map available! Resetting SLAM to IDLE.");
-          if (slamModeAvailable) mbot.resetSLAM(config.slam_mode.IDLE);
-          clearInterval(timerId);
-        }
-      }); }, config.MAP_UPDATE_PERIOD);
-    }
-    else if (slamMode === config.slam_mode.LOCALIZATION_ONLY) {
-      // Try requesting the map only once if we are in localization mode.
-      requestSLAMMap().then((val) => {
-        if (!val) {
-          // If we didn't get a SLAM map, keep asking for one until we get one or we timeout.
-          timerId = setInterval(() => {
-            requestSLAMMap().then((val) => {
-              if (val) clearInterval(timerId); // If we get a map, stop requesting.
-              if (mapRequestCount > config.STALE_MAP_COUNT) {
-                // Timeout condition. Give up localization mode and reset to IDLE.
-                console.warn("No map available! Resetting SLAM to IDLE.");
-                mbot.resetSLAM(config.slam_mode.IDLE);
-                clearInterval(timerId);
-              }
-            });
-          }, config.MAP_UPDATE_PERIOD);
+    if (connected && mapDisplay) {
+      unsubscribe = mbot.readMap((msg) => {
+        const headerData = {
+          width: msg.info.width,
+          height: msg.info.height,
+          metersPerCell: msg.info.resolution,
+          origin: [msg.info.origin.position.x, msg.info.origin.position.y]
+        };
+
+        if (scene.current.loaded) {
+          scene.current.setMapHeaderData(headerData.width, headerData.height, headerData.metersPerCell, headerData.origin);
+          scene.current.updateCells(msg.data);
         }
       });
     }
 
     // On quit, stop requesting.
     return () => {
-      if (timerId) clearInterval(timerId);
+      if (unsubscribe) unsubscribe();
     };
-  }, [slamMode, slamModeAvailable, mapDisplay]);
+  }, [connected, mapDisplay, mbot, scene]);
 
   return (
     <div id="canvas-container" ref={canvasWrapperRef}>
@@ -362,143 +273,49 @@ function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, lase
 export default function MBotApp({ mbot }) {
   const scene = useRef(new MBotScene());
   const [hostname, setHostname] = useState("mbot-???");
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(mbot.connected);
   // Toggle selectors.
   const [robotDisplay, setRobotDisplay] = useState(true);
   const [laserDisplay, setLaserDisplay] = useState(false);
-  const [particleDisplay, setParticleDisplay] = useState(false);
-  const [mapDisplay, setMapDisplay] = useState(false);
+  const [mapDisplay, setMapDisplay] = useState(true);
   const [drivingMode, setDrivingMode] = useState(false);
-  // Channels to subscribe to.
-  const [poseAvailable, setPoseAvailable] = useState(false);
-  const [laserAvailable, setLaserAvailable] = useState(false);
-  const [mapAvailable, setMapAvailable] = useState(false);
-  const [particlesAvailable, setParticlesAvailable] = useState(false);
-  const [slamModeAvailable, setSlamModeAvailable] = useState(false);
   // Robot parameters.
   const [robotPose, setRobotPose] = useState({x: 0, y: 0, theta: 0});
   const [robotCell, setRobotCell] = useState([0, 0]);
   // Visualization elements.
   const [clickedCell, setClickedCell] = useState([]);
-  // Mapping parameters.
-  const [slamMode, setSlamMode] = useState(config.slam_mode.INVALID);
-  // Saves the SLAM mode globally to avoid having to condition the status effect on the slamMode state.
-  const latestSlamMode = useRef(config.slam_mode.INVALID);
 
-  // A heartbeat effect that checks if the MBot Bridge backend is connected and
-  // updates which channels we care about are available.
+  // A heartbeat effect that checks if the MBot Bridge backend is connected
   useEffect(() => {
-    let timerId = null;
-
-    const chMaps = [
-      {state: poseAvailable, ch: config.POSE_CHANNEL, setter: setPoseAvailable},
-      {state: laserAvailable, ch: config.LIDAR_CHANNEL, setter: setLaserAvailable},
-      {state: mapAvailable, ch: config.SLAM_MAP_CHANNEL, setter: setMapAvailable},
-      {state: particlesAvailable, ch: config.PARTICLE_CHANNEL, setter: setParticlesAvailable},
-      {state: slamModeAvailable, ch: config.SLAM_MODE_CHANNEL, setter: setSlamModeAvailable},
-    ]
-
-    function checkChannels() {
-      mbot.readChannels().then((chs) => {
-        const chsList = chs.map((ch) => ch.channel);
-        if (!connected) setConnected(true);
-        // Check if any of the channels we are looking for have either appeared or disappeared.
-        for (const ele of chMaps) {
-          const hasData = chsList.includes(ele.ch);
-          if (hasData != ele.state) ele.setter(hasData);
-        }
-      }).catch((err) => {
-        if (connected) setConnected(false);
-      });
+    if (mbot.connected !== connected) {
+      setConnected(mbot.connected);
     }
 
-    // Check if connected once right away.
-    checkChannels();
+    const onConnect = () => setConnected(true);
+    const onClose = () => setConnected(false);
 
-    // Check for connection intermittently.
-    timerId = setInterval(() => { checkChannels(); }, config.CONNECT_PERIOD);
+    mbot.ros.on('connection', onConnect);
+    mbot.ros.on('close', onClose);
+    mbot.ros.on('error', onClose);
 
-    // Return the cleanup function which stops the rerender.
     return () => {
-      if (timerId) clearInterval(timerId);
+      mbot.ros.off('connection', onConnect);
+      mbot.ros.off('close', onClose);
+      mbot.ros.off('error', onClose);
     };
-  }, [connected, setConnected,
-      poseAvailable, setPoseAvailable,
-      laserAvailable, setLaserAvailable,
-      mapAvailable, setMapAvailable,
-      particlesAvailable, setParticlesAvailable,
-      slamModeAvailable, setSlamModeAvailable]);
+  }, [mbot, connected]);
 
-  // Effect to request the MBot hostname on first mounting component.
+  // Effect to set the MBot hostname on first mounting component.
   useEffect(() => {
-    // Read the hostname.
     if (connected) {
-      mbot.readHostname().then((name) => {
-        setHostname(name);
-      }).catch((err) => {
-        console.warn("Could not get hostname:", err);
-      });
+      setHostname(window.location.hostname);
     }
-  }, [connected, setHostname]);
-
-  // Effect to manage SLAM mode.
-  useEffect(() => {
-    if (!slamModeAvailable) return;
-
-    mbot.subscribe(config.SLAM_MODE_CHANNEL, (msg) => {
-      const data = msg.data;
-      // Only update if the mode has changed.
-      if (data.slam_mode !== latestSlamMode.current) {
-        setSlamMode(data.slam_mode);
-        latestSlamMode.current = data.slam_mode;
-      }
-    }).then().catch((error) => {
-      console.warn('Subscription failed for channel', config.SLAM_MODE_CHANNEL, error);
-    });
-
-    // Return the cleanup function which stops the subscription.
-    return () => {
-      mbot.unsubscribe(config.SLAM_MODE_CHANNEL).catch((err) => console.warn(err));
-    }
-  }, [slamModeAvailable, latestSlamMode, setSlamMode]);
-
-  // Callbacks.
-  const onLocalizationMode = useCallback(() => {
-    if (slamMode === config.slam_mode.IDLE) {
-      // State is idle. Change to localization only.
-      mbot.resetSLAM(config.slam_mode.LOCALIZATION_ONLY, false);
-      setSlamMode(config.slam_mode.LOCALIZATION_ONLY);
-    }
-    else if (slamModeAvailable) {
-      // We are in some other state. Turn back to idle.
-      mbot.resetSLAM(config.slam_mode.IDLE);
-      setSlamMode(config.slam_mode.IDLE);
-    }
-  }, [slamModeAvailable, slamMode, setSlamMode]);
-
-  const onMappingMode = useCallback(() => {
-    if (slamMode === config.slam_mode.FULL_SLAM) {
-      // If we're in full slam, we need to reset the robot to localization only mode.
-      mbot.resetSLAM(config.slam_mode.LOCALIZATION_ONLY, true);
-      setSlamMode(config.slam_mode.LOCALIZATION_ONLY);
-    }
-    else if (slamMode === config.slam_mode.LOCALIZATION_ONLY) {
-      // If we are not mapping, we need to tell the robot to start mapping.
-      if (!confirm("This will overwrite the current map. Are you sure?")) return;
-
-      mbot.resetSLAM(config.slam_mode.FULL_SLAM, false);
-      setSlamMode(config.slam_mode.FULL_SLAM);
-    }
-  }, [slamMode, setSlamMode]);
+  }, [connected]);
 
   const onResetMap = useCallback(() => {
-    if (slamMode === config.slam_mode.FULL_SLAM) {
-      // Get user confirmation that the map should be cleared.
-      if (!confirm("This will clear the current map. Are you sure?")) return;
-      // Reset in full SLAM mode.
-      mbot.resetSLAM(config.slam_mode.FULL_SLAM, false);
-    }
-  }, [slamMode]);
+    if (!confirm("This will clear the current map. Are you sure?")) return;
+    mbot.resetSlam(false).catch(err => console.warn(err));
+  }, [mbot]);
 
   const saveMap = useCallback(() => {
     if (!scene.current.loaded) return;
@@ -510,7 +327,7 @@ export default function MBotApp({ mbot }) {
     }
 
     downloadMapFile(mapData);
-  }, []);
+  }, [scene]);
 
   return (
     <div id="wrapper">
@@ -518,14 +335,7 @@ export default function MBotApp({ mbot }) {
         <MBotSceneWrapper mbot={mbot} scene={scene} connected={connected}
                           robotDisplay={robotDisplay}
                           laserDisplay={laserDisplay}
-                          particleDisplay={particleDisplay}
                           mapDisplay={mapDisplay}
-                          slamMode={slamMode}
-                          poseAvailable={poseAvailable}
-                          laserAvailable={laserAvailable}
-                          mapAvailable={mapAvailable}
-                          particlesAvailable={particlesAvailable}
-                          slamModeAvailable={slamModeAvailable}
                           setClickedCell={setClickedCell}
                           setRobotPose={setRobotPose}
                           setRobotCell={setRobotCell} />
@@ -545,37 +355,24 @@ export default function MBotApp({ mbot }) {
           </div>
 
           <div className="row">
-            {/* Only show the SLAM control panel if we have received a SLAM status message. */}
-            {slamModeAvailable &&
-                <SLAMControlPanel slamMode={slamMode}
-                                  onLocalizationMode={() => onLocalizationMode()}
-                                  onMappingMode={() => onMappingMode()}
-                                  onResetMap={() => onResetMap()}
-                                  saveMap={() => saveMap()} />
-              }
+              <SLAMControlPanel onResetMap={() => onResetMap()}
+                                saveMap={() => saveMap()} />
 
-              {/* If there is no SLAM mode, provide the option to display the map, if available. */}
-              {!slamModeAvailable &&
-               <ToggleSelect label={"Draw Map"} checked={mapDisplay} isActive={mapAvailable}
-                             explain={"Displays the SLAM map."}
-                             onChange={ () => { setMapDisplay(!mapDisplay); } }/>
-              }
+              <ToggleSelect label={"Draw Map"} checked={mapDisplay} isActive={connected}
+                            explain={"Displays the SLAM map."}
+                            onChange={ () => { setMapDisplay(!mapDisplay); } }/>
 
               { /* Checkboxes for map visualization. */}
-              <ToggleSelect label={"Draw Robot"} checked={robotDisplay}
+              <ToggleSelect label={"Draw Robot"} checked={robotDisplay} isActive={connected}
                             explain={"Displays the robot on the map."}
                             onChange={ () => { setRobotDisplay(!robotDisplay); } }/>
 
-              <ToggleSelect label={"Draw Particles"} checked={particleDisplay} isActive={particlesAvailable}
-                            explain={"Shows all the positions the robot thinks it might be at."}
-                            onChange={ () => { setParticleDisplay(!particleDisplay); } }/>
-
-              <ToggleSelect label={"Draw Lasers"} checked={laserDisplay} isActive={laserAvailable}
+              <ToggleSelect label={"Draw Lasers"} checked={laserDisplay} isActive={connected}
                             explain={"Displays the Lidar rays."}
                             onChange={ () => { setLaserDisplay(!laserDisplay); } }/>
 
               { /* Drive mode and control panel. */}
-              <ToggleSelect label={"Drive Mode"} checked={drivingMode}
+              <ToggleSelect label={"Drive Mode"} checked={drivingMode} isActive={connected}
                             explain={"To drive the robot with your keyboard, use A,D for left & right, " +
                                       "W,S for forward & backward, and Q,E to rotate. " +
                                       "Or, use the joystick and turn buttons in the drive panel."}

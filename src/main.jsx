@@ -1,6 +1,6 @@
 import React, { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { MBot } from "mbot-js-api";
+import { MBot } from "mbot_js";
 
 import MBotApp from "./app";
 
