@@ -8,5 +8,4 @@ To install the web app, first unpack this file with:
 Then install the dependencies and deploy:
 
   ./install_nginx.sh
-  ./install_python_deps.sh
   ./deploy_app.sh --no-rebuild

@@ -82,10 +82,7 @@ fi
 # Make a new top level directory and copy everything into it.
 INCLUDES="dist/ config/ \
           scripts/install_nginx.sh \
-          scripts/install_python_deps.sh \
-          scripts/deploy_app.sh \
-          mbot_omni_app.py
-          requirements.txt"
+          scripts/deploy_app.sh"
 FILE_NAME=mbot_web_app-$VERSION.tar.gz
 
 mkdir mbot_web_app-$VERSION

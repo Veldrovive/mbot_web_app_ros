@@ -15,7 +15,6 @@ Install the dependencies:
 ```bash
 cd mbot_web_app-$VERSION/
 ./install_nginx.sh
-./install_python_deps.sh
 ```
 Then deploy the app:
 ```bash
@@ -50,10 +49,9 @@ We also need MBot Bridge to build the web app. Clone [MBot Bridge](https://githu
 
 ### Installing from Source on a Robot
 
-To set up the webapp on a new robot from source, use the helper scripts. First, install nginx and the Python dependencies:
+To set up the webapp on a new robot from source, use the helper scripts. First, install nginx:
 ```bash
 ./scripts/install_nginx.sh
-./scripts/install_python_deps.sh
 ```
 Then, build and install the app.
 ```bash
@@ -101,49 +99,7 @@ The style file is in `css/main.css`, and the JavaScript being run is in
 If you go to `http://[SERVER_IP]:8000` in your browser, you should see the
 webapp.
 
-### Back end
 
-The backend is built using Flask and Python 3. If
-working on a Linux computer, you probably want to run the code in a virtual
-environment (on the Raspberry Pi, you can install things directly if you want).
-To make a virtual environment and then activate it, do:
-```bash
-python3.8 -m venv ~/envs/mbot-web-app
-source ~/envs/mbot-web-app/bin/activate
-```
-It will probably work with versions of Python 3 other than 3.8, if you don't
-have it installed, but the current code was tested with Python 3.8. You can
-replace `~/envs/` with your preferred path if you would like. To get out of the
-virtual environment, type `deactivate`.
-
-The setup for the Flask + React app is based off
-[this tutorial](https://blog.miguelgrinberg.com/post/how-to-create-a-react--flask-project).
-
-#### Installation
-
-In the virtual environment (if applicable), do:
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-Note: Any other Python requirements should be added to `requirements.txt`.
-
-You will need to install the LCM messages for the MBot in this environment. See the corresponding repo for instructions. If you have already installed it globally, you might have to delete build, activate this environment, then rebuild and reinstall. This will just additionally install the messages in your current Python virtual environment. It will not mess up your previous global version.
-
-#### Running
-
-To run the Flask app, do:
-```bash
-npm run start-api
-```
-
-Traffic on `http://[SERVER_IP]:8000` will be forwarded to `http://[SERVER_IP]:5000`,
-where the Flask server is running.
-
-**Note:** If you have the webapp installed already, you will need to stop the backend service to run it locally so that the two don't conflict. To stop the installed server, do:
-```bash
-sudo systemctl stop mbot-web-server.service
-```
 
 ## Generating a Release
 
