@@ -17,7 +17,7 @@ function DriveControlPanel({ drivingMode, mbot }) {
   const [joyActive, setJoyActive] = useState(false);
   const [keyActive, setKeyActive] = useState(false);
 
-  const driveCmd = useRef({vx: 0, vy: 0, wz: 0});
+  const driveCmd = useRef({ vx: 0, vy: 0, wz: 0 });
   const controlMapRef = useRef({
     s: { pressed: false, fn: "back" },
     w: { pressed: false, fn: "forward" },
@@ -26,7 +26,7 @@ function DriveControlPanel({ drivingMode, mbot }) {
     e: { pressed: false, fn: "tright" },
     q: { pressed: false, fn: "tleft" },
   });
-  const keyPressRef = useRef({x: 0, y: 0, t: 0});
+  const keyPressRef = useRef({ x: 0, y: 0, t: 0 });
 
   const handleKeyDown = useCallback((evt) => {
     let controlMap = controlMapRef.current;
@@ -111,9 +111,10 @@ function DriveControlPanel({ drivingMode, mbot }) {
     let timerId = null;
 
     if (joyActive || keyActive) {
-      mbot.drive(driveCmd.current.vx, driveCmd.current.vy, driveCmd.current.wz);
+      console.log(mbot)
+      mbot.publishCmdVel(driveCmd.current.vx, driveCmd.current.vy, driveCmd.current.wz);
       timerId = setInterval(() => {
-        mbot.drive(driveCmd.current.vx, driveCmd.current.vy, driveCmd.current.wz);
+        mbot.publishCmdVel(driveCmd.current.vx, driveCmd.current.vy, driveCmd.current.wz);
       }, config.DRIVE_CMD_RATE);
     }
 
@@ -136,13 +137,13 @@ function DriveControlPanel({ drivingMode, mbot }) {
     <div className="drive-panel-wrapper">
       <div className="drive-buttons">
         <button className="button drive-turn" id="turn-left"
-          onMouseDown={() => mbot.drive(0, 0, config.ANG_VEL_MULTIPLIER * speed / 100)}
+          onMouseDown={() => mbot.driveForever(0, 0, config.ANG_VEL_MULTIPLIER * speed / 100)}
           onMouseUp={() => mbot.stop()}>
           <FontAwesomeIcon icon={faArrowRotateLeft} />
         </button>
 
         <button className="button drive-turn" id="turn-right"
-          onMouseDown={() => mbot.drive(0, 0, -config.ANG_VEL_MULTIPLIER * speed / 100)}
+          onMouseDown={() => mbot.driveForever(0, 0, -config.ANG_VEL_MULTIPLIER * speed / 100)}
           onMouseUp={() => mbot.stop()}>
           <FontAwesomeIcon icon={faArrowRotateRight} />
         </button>

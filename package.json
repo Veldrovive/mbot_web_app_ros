@@ -13,7 +13,7 @@
     "@fortawesome/fontawesome-svg-core": "^6.1.2",
     "@fortawesome/free-solid-svg-icons": "^6.1.2",
     "@fortawesome/react-fontawesome": "^0.2.0",
-    "mbot_js": "file:../mbot_bridge_ros/mbot_js",
+    "mbot_js": "file:mbot_bridge_ros/mbot_js",
     "pixi.js": "^8.1.6",
     "react": "^18.0.2",
     "react-dom": "^18.0.2"
