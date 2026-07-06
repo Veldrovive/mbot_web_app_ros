@@ -162,7 +162,10 @@ class OccupancyGrid {
       for (let r = 0; r < this.height; r++) {
         let idx = this.cellToIdx(r, c);
         if (cells[idx] != this.mapCells[idx]){
-          let prob = (cells[idx] + 127.) / 255.;
+          let prob = 0.5;
+          if (cells[idx] >= 0) {
+            prob = cells[idx] / 100.0;
+          }
           let color = getColor(prob, this.colorRange[0], this.colorRange[1]);
           let pos = this.cellToPixels(r, c);
 
@@ -172,7 +175,7 @@ class OccupancyGrid {
           }
           else {
             // Skip any cells that already the colour of the background.
-            if (cells[idx] == 0) continue;
+            if (cells[idx] == -1) continue;
             // If there was not a grid cell here, create a new one.
             let cell = new Graphics(this.cellContext);
             cell.x = pos[0];
