@@ -147,8 +147,8 @@ function MBotSceneWrapper({ mbot, scene, connected, robotDisplay, laserDisplay, 
       return;
     }
 
-    const clickedCell = [...scene.current.pixelsToCell(pos[0], pos[1]),
-                         ...scene.current.pixelsToPos(pos[0], pos[1])];
+    // pos is in world coordinates (meters). Cell is [row, col].
+    const clickedCell = [...scene.current.posToCell(pos[0], pos[1]), pos[0], pos[1]];
     setClickedCell(clickedCell);
   }, [setClickedCell, scene]);
 
@@ -172,14 +172,18 @@ function MBotSceneWrapper({ mbot, scene, connected, robotDisplay, laserDisplay, 
 
     let unsubscribe = null;
     if (connected && robotDisplay) {
+      // Throttle React state updates; the sidebar re-renders on every set.
+      const minPeriod = 1000 / config.ODOM_DISPLAY_RATE;
+      let lastDisplay = 0;
       unsubscribe = mbot.readOdom((msg) => {
-        // Sets the robot position
+        if (scene.current.loaded) scene.current.updateRobot(msg.x, msg.y, msg.theta);
+
+        const now = performance.now();
+        if (now - lastDisplay < minPeriod) return;
+        lastDisplay = now;
         setRobotPose({x: msg.x, y: msg.y, theta: msg.theta});
-        if (!scene.current.loaded) return;
-        scene.current.updateRobot(msg.x, msg.y, msg.theta);
-        if (scene.current.isMapLoaded()) {
-          const robotCell = scene.current.posToCell(msg.x, msg.y);
-          setRobotCell(robotCell);
+        if (scene.current.loaded && scene.current.isMapLoaded()) {
+          setRobotCell(scene.current.posToCell(msg.x, msg.y));
         }
       });
     }
@@ -242,25 +246,31 @@ function MBotSceneWrapper({ mbot, scene, connected, robotDisplay, laserDisplay, 
       scene.current.clear();  // Clear the scene on change.
     }
 
+    // Only the newest map is kept; it is rendered on the next animation frame,
+    // so a burst of map messages never queues up redundant renders.
+    let pendingMap = null;
+    let frameId = null;
+    const renderMap = () => {
+      frameId = null;
+      const msg = pendingMap;
+      pendingMap = null;
+      if (!msg || !scene.current.loaded) return;
+      const info = msg.info;
+      scene.current.updateMap(info.width, info.height, info.resolution,
+                              [info.origin.position.x, info.origin.position.y], msg.data);
+    };
+
     if (connected && mapDisplay) {
       unsubscribe = mbot.readMap((msg) => {
-        const headerData = {
-          width: msg.info.width,
-          height: msg.info.height,
-          metersPerCell: msg.info.resolution,
-          origin: [msg.info.origin.position.x, msg.info.origin.position.y]
-        };
-
-        if (scene.current.loaded) {
-          scene.current.setMapHeaderData(headerData.width, headerData.height, headerData.metersPerCell, headerData.origin);
-          scene.current.updateCells(msg.data);
-        }
+        pendingMap = msg;
+        if (frameId === null) frameId = requestAnimationFrame(renderMap);
       });
     }
 
     // On quit, stop requesting.
     return () => {
       if (unsubscribe) unsubscribe();
+      if (frameId !== null) cancelAnimationFrame(frameId);
     };
   }, [connected, mapDisplay, mbot, scene]);
 

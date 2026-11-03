@@ -1,214 +1,191 @@
-import { Container, Graphics, GraphicsContext, Application, Assets, Sprite, Point } from 'pixi.js';
+import { Container, Graphics, Application, Assets, Sprite, Texture, BufferImageSource } from 'pixi.js';
 
 import config from "./config.js";
 
- function colourStringToRGB(colour_str) {
-  var rgb = [parseInt(colour_str.substring(1, 3), 16),
-             parseInt(colour_str.substring(3, 5), 16),
-             parseInt(colour_str.substring(5, 7), 16)];
-  return rgb;
+function colourStringToRGB(colour_str) {
+  return [parseInt(colour_str.substring(1, 3), 16),
+          parseInt(colour_str.substring(3, 5), 16),
+          parseInt(colour_str.substring(5, 7), 16)];
 }
 
 function getColor(prob, colour_low, colour_high) {
   // Takes a probability (number from 0 to 1) and converts it into a color code
-  var colour_low_a = colourStringToRGB(colour_low);
-  var colour_high_a = colourStringToRGB(colour_high);
-
-  var hex = function(x) {
-    x = x.toString(16);
-    return (x.length == 1) ? '0' + x : x;
-  };
-
-  var r = Math.ceil(colour_high_a[0] * prob + colour_low_a[0] * (1 - prob));
-  var g = Math.ceil(colour_high_a[1] * prob + colour_low_a[1] * (1 - prob));
-  var b = Math.ceil(colour_high_a[2] * prob + colour_low_a[2] * (1 - prob));
-
-  var color = hex(r) + hex(g) + hex(b);
-  return "#" + color;
+  const lo = colourStringToRGB(colour_low);
+  const hi = colourStringToRGB(colour_high);
+  const hex = (x) => x.toString(16).padStart(2, '0');
+  const mix = (i) => Math.round(hi[i] * prob + lo[i] * (1 - prob));
+  return "#" + hex(mix(0)) + hex(mix(1)) + hex(mix(2));
 }
 
+// Packs an RGB triple into a little-endian RGBA Uint32 (bytes in memory: R, G, B, A).
+function packRGBA(rgb) {
+  return (rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (0xff << 24)) >>> 0;
+}
 
+/**
+ * Builds a 256-entry lookup table from a ROS occupancy value (int8, indexed
+ * by `value & 0xFF`) to a packed RGBA colour.
+ *   0..100  -> linear ramp from free colour to occupied colour.
+ *   101..127 -> occupied colour.
+ *   negative (incl. -1) -> unknown colour.
+ */
+function buildColourLUT(freeColour, occupiedColour, unknownColour) {
+  const lut = new Uint32Array(256);
+  const unknown = packRGBA(colourStringToRGB(unknownColour));
+  for (let i = 0; i < 256; i++) {
+    if (i >= 128) {
+      lut[i] = unknown;
+    } else {
+      const p = Math.min(i, 100) / 100;
+      lut[i] = packRGBA(colourStringToRGB(getColor(p, freeColour, occupiedColour)));
+    }
+  }
+  return lut;
+}
+
+// Max texture edge length per tile. 2048 is supported by effectively every GPU.
+const TILE_SIZE = 2048;
+
+/**
+ * Renders a ROS OccupancyGrid as a set of nearest-neighbour textures in world
+ * coordinates (meters). Lives inside a y-up world container, so texel row 0
+ * (the ROS bottom row) naturally renders at the bottom.
+ */
 class OccupancyGrid {
-  constructor(viewSize, colors = [config.MAP_COLOUR_LOW, config.MAP_COLOUR_HIGH]) {
-    // Map data.
-    this.width = 0;           // Map width in cells.
-    this.height = 0;         // Map height in cells.
+  constructor() {
+    this.width = 0;
+    this.height = 0;
     this.metersPerCell = 0.05;
     this.origin = [0, 0];
-    this.pixWidth = viewSize[0];   // Map width in pixels.
-    this.pixHeight = viewSize[1];  // Map height in pixels.
-    this.pixPerCell = 5;
-    this.pixelsPerMeter = this.pixPerCell / this.metersPerCell;
-    this.colorRange = colors;  // Colours to interpolate between for display.
+    this.cells = null;  // The latest raw cell data (array or typed array).
 
-    this.mapCells = [];  // Current cell values.
-    this.gridMap = {};
-
-    this.gridContainer = null;  // Container for holding the grid render objects.
-    this.cellContext = null;    // Shared context for drawing the cells.
-  }
-
-  cellToPixels(r, c) {
-    let v = ((this.height - r - 1) * this.pixPerCell);
-    let u = (c * this.pixPerCell);
-    return [u, v];
-  }
-
-  pixelsToCell(u, v) {
-    let row = Math.floor((this.pixHeight - v) / this.pixPerCell);
-    let col = Math.floor(u / this.pixPerCell);
-    return [row, col];
+    this.lut = buildColourLUT(config.MAP_COLOUR_LOW, config.MAP_COLOUR_HIGH, config.MAP_COLOUR_UNKNOWN);
+    this.container = new Container();
+    this.tiles = [];  // {x0, y0, w, h, pixels (Uint32Array), source, sprite}
   }
 
   posToCell(x, y) {
-    let i = Math.floor((x - this.origin[0]) / this.metersPerCell);
-    let j = Math.floor((y - this.origin[1]) / this.metersPerCell);
-    return [j, i];
+    const col = Math.floor((x - this.origin[0]) / this.metersPerCell);
+    const row = Math.floor((y - this.origin[1]) / this.metersPerCell);
+    return [row, col];
   }
 
-  cellToIdx(r, c) {
-    return c + r * this.width;
+  cellToPos(r, c) {
+    // Returns the world position of the bottom-left corner of the cell.
+    return [this.origin[0] + c * this.metersPerCell, this.origin[1] + r * this.metersPerCell];
   }
 
-  idxToCell(idx) {
-    let r = Math.floor(idx / this.width);
-    let c = idx % this.width;
-    return [r, c];
+  // World-frame bounds of the map: [xmin, ymin, xmax, ymax].
+  bounds() {
+    return [this.origin[0], this.origin[1],
+            this.origin[0] + this.width * this.metersPerCell,
+            this.origin[1] + this.height * this.metersPerCell];
   }
 
-  setMapData(width, height, m_per_cell = 0.05, origin = [0, 0]) {
-    // If this data is the same, no need to recompute or clear.
-    if (width === this.width && height === this.height &&
-        m_per_cell === this.metersPerCell &&
-        origin[0] === this.origin[0] && origin[1] === this.origin[1]) return;
-
-    this.width = width;
-    this.height = height;
-    this.metersPerCell = m_per_cell;
-    this.origin = origin;
-    this.pixPerCell = this.pixWidth / this.width;
-    this.pixelsPerMeter = this.pixWidth / this.width / m_per_cell;
-
-    this.clear();
-
-    // Make a new cell context of the right size.
-    if (this.cellContext) this.cellContext.destroy();
-    this.cellContext = new GraphicsContext()
-      .rect(0, 0, this.pixPerCell, this.pixPerCell)
-      .fill(0xffffff);
+  isLoaded() {
+    return this.cells !== null;
   }
 
-  getMapData() {
-    if (this.mapCells.length !== this.width * this.height) {
+  destroyTiles() {
+    for (const t of this.tiles) {
+      t.sprite.destroy();
+      t.texture.destroy(true);
+    }
+    this.tiles = [];
+    this.container.removeChildren();
+  }
+
+  allocateTiles() {
+    this.destroyTiles();
+    for (let y0 = 0; y0 < this.height; y0 += TILE_SIZE) {
+      for (let x0 = 0; x0 < this.width; x0 += TILE_SIZE) {
+        const w = Math.min(TILE_SIZE, this.width - x0);
+        const h = Math.min(TILE_SIZE, this.height - y0);
+        const bytes = new Uint8Array(w * h * 4);
+        const source = new BufferImageSource({
+          resource: bytes, width: w, height: h,
+          format: 'rgba8unorm', scaleMode: 'nearest', autoGenerateMipmaps: false,
+        });
+        const texture = new Texture({ source });
+        const sprite = new Sprite(texture);
+        sprite.position.set(x0, y0);  // In cell units; container is scaled to meters.
+        this.container.addChild(sprite);
+        this.tiles.push({ x0, y0, w, h, pixels: new Uint32Array(bytes.buffer), source, texture, sprite });
+      }
+    }
+  }
+
+  /**
+   * Updates the map. Only reallocates GPU textures if the dimensions change;
+   * origin or resolution changes just move / rescale the container.
+   */
+  update(width, height, metersPerCell, origin, cells) {
+    if (cells.length !== width * height) {
+      console.warn(`Map data size mismatch: ${cells.length} != ${width * height}`);
       return;
     }
 
-    let mapData = {"cells": this.mapCells,
-                   "width": this.width,
-                   "height": this.height,
-                   "origin": this.origin,
-                   "metersPerCell": this.metersPerCell};
-    return mapData;
-  }
+    if (width !== this.width || height !== this.height) {
+      this.width = width;
+      this.height = height;
+      this.allocateTiles();
+    }
+    this.metersPerCell = metersPerCell;
+    this.origin = [origin[0], origin[1]];
+    this.container.position.set(origin[0], origin[1]);
+    this.container.scale.set(metersPerCell);
+    this.cells = cells;
 
-  init() {
-    if (this.gridContainer) this.gridContainer.destroy();
-
-    // This container will hold all the grid cells.
-    this.gridContainer = new Container();
-    // Make the background all grey so we can ignore any uncertain cells.
-    let bkgd = new Graphics();
-    bkgd.rect(0, 0, this.pixWidth, this.pixHeight)
-        .fill(getColor(0.5, this.colorRange[0], this.colorRange[1]));
-    this.gridContainer.addChild(bkgd);
-
-    if (this.cellContext) this.cellContext.destroy();
-    // Create a cell context to be used to draw cells later.
-    this.cellContext = new GraphicsContext()
-      .rect(0, 0, this.pixPerCell, this.pixPerCell)
-      .fill(0xffffff);
-
-    this.gridMap = {};
-    this.mapCells = [];
-
-    return this.gridContainer;
+    const lut = this.lut;
+    for (const t of this.tiles) {
+      const px = t.pixels;
+      let o = 0;
+      for (let r = 0; r < t.h; r++) {
+        let i = (t.y0 + r) * width + t.x0;
+        const end = i + t.w;
+        for (; i < end; i++) px[o++] = lut[cells[i] & 0xff];
+      }
+      t.source.update();
+    }
   }
 
   clear() {
-    if (this.gridContainer) {
-      // Clear all the current grid cells. Skip the first since it's the background.
-      for (let i = 1; i < this.gridContainer.children.length; i++) {
-        this.gridContainer.children[i].destroy();
-      }
-      this.gridContainer.children.splice(1);  // Remove cells from the list. Again, keep background.
-    }
-    this.gridMap = {};
-
-    // Reset the cells.
-    this.mapCells = [];
+    this.destroyTiles();
+    this.width = 0;
+    this.height = 0;
+    this.cells = null;
   }
 
-  updateCells(cells) {
-    if (cells.length !== this.width * this.height) {
-      console.warn("Error. Cannot render canvas: " + String(cells.length) + " != " + String(this.width*this.height));
-      return;
-    }
-
-    if (cells.length !== this.mapCells.length) {
-      this.clear();
-    }
-
-    for (let c = 0; c < this.width; c++) {
-      for (let r = 0; r < this.height; r++) {
-        let idx = this.cellToIdx(r, c);
-        if (cells[idx] != this.mapCells[idx]){
-          let prob = (cells[idx] + 127.) / 255.;
-          let color = getColor(prob, this.colorRange[0], this.colorRange[1]);
-          let pos = this.cellToPixels(r, c);
-
-          if (this.gridMap[idx]) {
-            // If we already have a grid cell at this location, just update its color.
-            this.gridContainer.children[this.gridMap[idx]].tint = parseInt(color.slice(1), 16);
-          }
-          else {
-            // Skip any cells that already the colour of the background.
-            if (cells[idx] == 0) continue;
-            // If there was not a grid cell here, create a new one.
-            let cell = new Graphics(this.cellContext);
-            cell.x = pos[0];
-            cell.y = pos[1];
-            cell.tint = parseInt(color.slice(1), 16);
-            this.gridContainer.addChild(cell);
-            // Save the order of this cell in the children.
-            this.gridMap[idx] = this.gridContainer.children.length - 1;
-          }
-        }
-      }
-    }
-
-    this.mapCells = cells;
+  getMapData() {
+    if (!this.isLoaded()) return null;
+    return {
+      cells: this.cells,
+      width: this.width,
+      height: this.height,
+      origin: this.origin,
+      metersPerCell: this.metersPerCell,
+    };
   }
-
 }
 
 
+/**
+ * The scene is drawn in world coordinates (meters, y up). The `world`
+ * container's transform maps world -> screen pixels:
+ *   screen = (world.x + s * x, world.y - s * y), where s = world.scale.x.
+ */
 class MBotScene {
   constructor() {
     this.app = null;
-
     this.robotState = {x: 0, y: 0, theta: 0};
-    // Map data.
-    const DEFAULT_WIDTH = 100;  // Default number of cells if no map is provided.
-    this.metersPerCell = 0.05;  // Default meters per cell.
-    const origin = -this.metersPerCell * DEFAULT_WIDTH / 2;  // By default, origin is in the center.
-    this.origin = [origin, origin];
-    this.pixWidth = config.CANVAS_DISPLAY_WIDTH;
-    this.pixHeight = config.CANVAS_DISPLAY_HEIGHT;
-    this.pixPerCell = this.pixWidth / DEFAULT_WIDTH;
-    this.pixelsPerMeter = this.pixPerCell / this.metersPerCell;
+    this.occupancyGrid = new OccupancyGrid();
 
-    this.occupancyGrid = new OccupancyGrid([this.pixWidth, this.pixHeight]);
-    this.occupancyGrid.setMapData(DEFAULT_WIDTH, DEFAULT_WIDTH, this.metersPerCell, this.origin);
+    // Default view bounds if no map is loaded: 5m x 5m centred on the origin.
+    this.defaultBounds = [-2.5, -2.5, 2.5, 2.5];
+    this.needsFit = true;  // Fit the view to the map on the next map update.
+
+    this.lastPath = null;
+    this.clickedPos = null;
 
     this.dragStart = null;
     this.clickStart = null;
@@ -219,38 +196,20 @@ class MBotScene {
   }
 
   async init() {
-    return new Promise(async (resolve, reject) => {
+    if (this.stopped) throw new Error("Initialization aborted because destroy was called.");
+    if (this.loaded || this.app) throw new Error("App is already initialized or initialization was already called.");
 
-      if (this.stopped) {
-        this.loaded = false;
-        reject(new Error("Initialization aborted because destroy was called."));
-        return;
-      }
+    this.app = new Application();
+    this.loaded = false;
+    await this.app.init({ resizeTo: window, backgroundColor: 0xc9d1d9 });
 
-      if (this.loaded || this.app) {
-        reject("App is already initialized or initialization was already called.");
-      }
+    const imgUrl = new URL('./images/mbot.png', import.meta.url).href;
+    this.robotImage = await Assets.load(imgUrl);
 
-      this.app = new Application();
-      this.loaded = false;
-
-      try {
-        await this.app.init({resizeTo: window, backgroundColor: 0xc9d1d9 });
-
-        const imgUrl = new URL('./images/mbot.png', import.meta.url).href;
-        this.robotImage = await Assets.load(imgUrl);
-
-        // Check one last time before considering initialization complete
-        if (this.stopped) {
-          this.app.destroy(true, true);
-          reject("Initialization aborted because destroy was called.");
-        } else {
-          resolve();
-        }
-      } catch (error) {
-        reject(error); // Ensure any errors are caught and the promise is rejected
-      }
-    });
+    if (this.stopped) {
+      this.app.destroy(true, true);
+      throw new Error("Initialization aborted because destroy was called.");
+    }
   }
 
   destroy() {
@@ -261,172 +220,158 @@ class MBotScene {
     this.stopped = true;
   }
 
+  get scale() {
+    return this.world ? this.world.scale.x : 1;
+  }
+
+  // Converts a length in screen pixels to meters at the current zoom.
+  pxToM(px) {
+    return px / this.scale;
+  }
+
   createScene(ele) {
     this.app.resizeTo = ele;
     ele.appendChild(this.app.canvas);
 
-    this.sceneContainer = new Container();
-    this.app.stage.addChild(this.sceneContainer);
+    // World container: meters, y up.
+    this.world = new Container();
+    this.app.stage.addChild(this.world);
 
-    // Initialize the occupancy grid and add its container to the scene.
-    let gridContainer = this.occupancyGrid.init();
-    this.sceneContainer.addChild(gridContainer);
+    this.world.addChild(this.occupancyGrid.container);
 
-    // Empty graphics to draw particles.
     this.particlesGraphics = new Graphics();
-    this.sceneContainer.addChild(this.particlesGraphics);
+    this.world.addChild(this.particlesGraphics);
 
-    // Empty graphics to draw path.
     this.pathGraphics = new Graphics();
-    this.sceneContainer.addChild(this.pathGraphics);
+    this.world.addChild(this.pathGraphics);
 
-    // Empty graphics to draw clicked cell.
     this.clickedCellGraphics = new Graphics();
-    this.sceneContainer.addChild(this.clickedCellGraphics);
+    this.world.addChild(this.clickedCellGraphics);
 
-    // Robot Container.
+    // Robot container, in the robot frame.
     this.robotContainer = new Container();
-
-    // Empty graphics to draw the lasers, in the robot frame.
     this.laserGraphics = new Graphics();
     this.robotContainer.addChild(this.laserGraphics);
 
     this.robot = new Sprite(this.robotImage);
     this.robot.anchor.set(0.5);
-    // Move the sprite to the center of the screen
-    this.robotContainer.x = this.pixWidth / 2;
-    this.robotContainer.y = this.pixHeight / 2;
-    this.robot.x = 0;
-    this.robot.y = 0;
-    this.robot.width = config.ROBOT_SIZE * this.pixelsPerMeter;
-    this.robot.height = config.ROBOT_SIZE * this.pixelsPerMeter;
+    // Size in meters; negative y scale undoes the world y-flip so the image isn't mirrored.
+    const s = config.ROBOT_SIZE / this.robotImage.width;
+    this.robot.scale.set(s, -s);
     this.robotContainer.addChild(this.robot);
+    this.world.addChild(this.robotContainer);
 
-    this.sceneContainer.addChild(this.robotContainer);
+    this.fitView(this.defaultBounds);
 
-    // Interaction code for panning
-    this.dragStart = null;
-    this.sceneContainer.interactive = true;
-    this.sceneContainer.on('pointerdown', (event) => {
-        this.dragStart = event.data.getLocalPosition(this.sceneContainer.parent);
-        this.clickStart = event.data.getLocalPosition(this.sceneContainer.parent);
+    // Interaction: the whole stage is the hit area so you can drag anywhere.
+    const stage = this.app.stage;
+    stage.eventMode = 'static';
+    stage.hitArea = this.app.screen;
+
+    stage.on('pointerdown', (event) => {
+      this.dragStart = { x: event.global.x, y: event.global.y };
+      this.clickStart = { x: event.global.x, y: event.global.y };
     });
 
-    this.sceneContainer.on('pointerup', (event) => {
-      let upPos = event.data.getLocalPosition(this.sceneContainer.parent);
-      if (this.clickStart) {
-        // Detect a click if the pointer was raised close to where it started.
-        if (Math.abs(this.clickStart.x - upPos.x) < 1 &&
-            Math.abs(this.clickStart.y - upPos.y) < 1) {
-          // Convert the clicked point into the scene frame in order to account for scaling and zooming.
-          let localPos = this.sceneContainer.toLocal(new Point(this.clickStart.x, this.clickStart.y));
-          // Draw the cell.
-          this.drawClickedCell(localPos.x, localPos.y);
-          // Call any user-defined click callback.
-          this.clickCallback([localPos.x, localPos.y]);
-        }
+    stage.on('pointerup', (event) => {
+      if (this.clickStart &&
+          Math.abs(this.clickStart.x - event.global.x) < 2 &&
+          Math.abs(this.clickStart.y - event.global.y) < 2) {
+        const pos = this.screenToWorld(this.clickStart.x, this.clickStart.y);
+        this.drawClickedCell(pos[0], pos[1]);
+        this.clickCallback(pos);
       }
       this.dragStart = null;
       this.clickStart = null;
-      this.constrainSceneContainer();
+      this.constrainView();
     });
 
-    this.sceneContainer.on('pointerupoutside', (event) => {
+    stage.on('pointerupoutside', () => {
       this.dragStart = null;
       this.clickStart = null;
-      this.constrainSceneContainer();
+      this.constrainView();
     });
 
-    this.sceneContainer.on('pointermove', (event) => {
-        if (this.dragStart) {
-            const dragEnd = event.data.getLocalPosition(this.sceneContainer.parent);
-            const dragNew = {
-                x: dragEnd.x - this.dragStart.x,
-                y: dragEnd.y - this.dragStart.y,
-            };
-
-            this.sceneContainer.x += dragNew.x;
-            this.sceneContainer.y += dragNew.y;
-            this.dragStart = dragEnd;
-        }
+    stage.on('pointermove', (event) => {
+      if (!this.dragStart) return;
+      this.world.x += event.global.x - this.dragStart.x;
+      this.world.y += event.global.y - this.dragStart.y;
+      this.dragStart = { x: event.global.x, y: event.global.y };
     });
 
-    // Interaction code for zooming
-    this.app.canvas.addEventListener('wheel', (event) => { this.zoomHandler(event); });
+    this.app.canvas.addEventListener('wheel', (event) => { this.zoomHandler(event); }, { passive: false });
 
     this.loaded = true;
   }
 
+  screenToWorld(u, v) {
+    const s = this.scale;
+    return [(u - this.world.x) / s, -(v - this.world.y) / s];
+  }
+
+  setView(s, x, y) {
+    this.world.scale.set(s, -s);
+    this.world.position.set(x, y);
+    this.redrawZoomDependent();
+  }
+
+  // Sets the view so the given world bounds fill the screen.
+  fitView(bounds) {
+    const [xmin, ymin, xmax, ymax] = bounds;
+    const W = this.app.screen.width, H = this.app.screen.height;
+    const s = Math.min(W / (xmax - xmin), H / (ymax - ymin)) * 0.95;
+    const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
+    this.setView(s, W / 2 - s * cx, H / 2 + s * cy);
+  }
+
+  viewBounds() {
+    return this.occupancyGrid.isLoaded() ? this.occupancyGrid.bounds() : this.defaultBounds;
+  }
+
   zoomHandler(event) {
     event.preventDefault();
-    const scaleFactor = 1.1;
-    let globalPos = this.sceneContainer.toLocal(new Point(event.x, event.y));
-    // The farthest out you can scale (assuming that the grid is square).
-    let minScale = Math.min(this.app.canvas.width, this.app.canvas.height) / (this.pixWidth);
-    const direction = event.deltaY > 0 ? -1 : 1;  // Negative if scrolling up, positive if down
-    const scale = Math.pow(scaleFactor, direction);
-    let scaleX = this.sceneContainer.scale.x * scale;
-    let scaleY = this.sceneContainer.scale.y * scale;
+    const [xmin, ymin, xmax, ymax] = this.viewBounds();
+    const W = this.app.screen.width, H = this.app.screen.height;
+    // Zoom out until the map is half the screen; zoom in until a 1cm square is ~40px.
+    const minScale = 0.5 * Math.min(W / (xmax - xmin), H / (ymax - ymin));
+    const maxScale = 4000;
 
-    if (scaleX > minScale && scaleY > minScale) {
-        // Zoom
-        this.sceneContainer.scale.set(scaleX); // x = scaleX;
-        this.sceneContainer.pivot.x = globalPos.x;
-        this.sceneContainer.pivot.y = globalPos.y;
-        this.sceneContainer.position.set(event.x, event.y);
-    }
-    else {
-      // Don't zoom out more than the size of the screen.
-        this.sceneContainer.scale.set(minScale);
-        this.sceneContainer.position.set(0, 0);
-        this.sceneContainer.pivot.x = 0;
-        this.sceneContainer.pivot.y = 0;
-    }
+    const direction = event.deltaY > 0 ? -1 : 1;
+    const s = this.scale;
+    const s2 = Math.min(maxScale, Math.max(minScale, s * Math.pow(1.1, direction)));
+    if (s2 === s) return;
 
-    this.constrainSceneContainer();
+    // Keep the world point under the cursor fixed.
+    const cx = event.offsetX, cy = event.offsetY;
+    const [wx, wy] = this.screenToWorld(cx, cy);
+    this.setView(s2, cx - s2 * wx, cy + s2 * wy);
+    this.constrainView();
   }
 
-  constrainSceneContainer() {
-    // Don't let the scene container go out of the view more than it needs to.
-    let pt0 = this.sceneContainer.toLocal(new Point(0, 0));
-    let pt1 = this.sceneContainer.toLocal(new Point(this.app.canvas.width, this.app.canvas.height));
-    if (pt0.x < 0) {
-      this.sceneContainer.pivot.x = 0;
-      this.sceneContainer.x = 0;
-    }
-    else if (pt1.x > this.pixWidth) {
-      let new_x = this.sceneContainer.x + this.sceneContainer.scale.x * (pt1.x - this.pixWidth);
-      if (this.pixWidth * this.sceneContainer.scale.x < this.app.canvas.width) {
-        // If the scene is smaller than the screen, don't snap to the far side.
-        this.sceneContainer.pivot.x = 0;
-        new_x = Math.min(new_x, 0);
-      }
-      this.sceneContainer.x = new_x;
-    }
-    if (pt0.y < 0) {
-      this.sceneContainer.pivot.y = 0;
-      this.sceneContainer.y = 0;
-    }
-    else if (pt1.y > this.pixHeight) {
-      let new_y = this.sceneContainer.y + this.sceneContainer.scale.x * (pt1.y - this.pixHeight);
-      if (this.pixHeight * this.sceneContainer.scale.x < this.app.canvas.height) {
-        // If the scene is smaller than the screen, don't snap to the bottom.
-        this.sceneContainer.pivot.y = 0;
-        new_y = Math.min(new_y, 0);
-      }
-      this.sceneContainer.y = new_y;
+  // Keep the centre of the screen within the map bounds so the map can't be lost.
+  constrainView() {
+    const [xmin, ymin, xmax, ymax] = this.viewBounds();
+    const W = this.app.screen.width, H = this.app.screen.height;
+    const s = this.scale;
+    const [cx, cy] = this.screenToWorld(W / 2, H / 2);
+    const nx = Math.min(xmax, Math.max(xmin, cx));
+    const ny = Math.min(ymax, Math.max(ymin, cy));
+    if (nx !== cx || ny !== cy) {
+      this.world.position.set(W / 2 - s * nx, H / 2 + s * ny);
     }
   }
 
-  setMapHeaderData(width, height, m_per_cell = 0.05, origin = [0, 0]) {
-    this.occupancyGrid.setMapData(width, height, m_per_cell, origin);
-    this.metersPerCell = m_per_cell;
-    this.pixPerCell = this.pixWidth / width;
-    this.pixelsPerMeter = this.pixWidth / width / m_per_cell;
-    this.origin = origin;
+  // Re-stroke things whose line widths are specified in screen pixels.
+  redrawZoomDependent() {
+    if (this.lastPath) this.drawPath(this.lastPath);
+  }
 
-    this.robot.width = config.ROBOT_SIZE * this.pixelsPerMeter;
-    this.robot.height = config.ROBOT_SIZE * this.pixelsPerMeter;
+  updateMap(width, height, metersPerCell, origin, cells) {
+    this.occupancyGrid.update(width, height, metersPerCell, origin, cells);
+    if (this.needsFit && this.occupancyGrid.isLoaded()) {
+      this.fitView(this.occupancyGrid.bounds());
+      this.needsFit = false;
+    }
   }
 
   getMapData() {
@@ -434,27 +379,7 @@ class MBotScene {
   }
 
   isMapLoaded() {
-    return this.occupancyGrid.mapCells.length > 0;
-  }
-
-  posToPixels(x, y) {
-    let u = (x - this.origin[0]) * this.pixelsPerMeter;
-    let v = this.pixHeight - (y - this.origin[1]) * this.pixelsPerMeter;
-    return [u, v];
-  }
-
-  pixelsToPos(u, v){
-    let x = (u / this.pixelsPerMeter) + this.origin[0];
-    let y = (this.pixHeight - v) / this.pixelsPerMeter + this.origin[1];
-    return [x, y];
-  }
-
-  cellToPixels(r, c) {
-    return this.occupancyGrid.cellToPixels(r, c);
-  }
-
-  pixelsToCell(u, v) {
-    return this.occupancyGrid.pixelsToCell(u, v);
+    return this.occupancyGrid.isLoaded();
   }
 
   posToCell(x, y) {
@@ -462,21 +387,17 @@ class MBotScene {
   }
 
   clear() {
-    // Clear the occupancy grid.
     this.occupancyGrid.clear();
-
-    // Clear all saved graphics.
-    this.pathGraphics.clear();
-    this.particlesGraphics.clear();
+    this.needsFit = true;
+    this.clearPath();
+    this.clearParticles();
     this.clickedCellGraphics.clear();
+    this.clickedPos = null;
   }
 
   updateRobot(x, y, theta = 0) {
-    let pix = this.posToPixels(x, y);
-    this.robotContainer.x = pix[0];
-    this.robotContainer.y = pix[1];
-    this.robotContainer.rotation = -theta;
-
+    this.robotContainer.position.set(x, y);
+    this.robotContainer.rotation = theta;  // World is y-up, so positive is CCW.
     this.robotState.x = x;
     this.robotState.y = y;
     this.robotState.theta = theta;
@@ -486,74 +407,65 @@ class MBotScene {
     this.robot.visible = visible;
   }
 
-  updateCells(cells) {
-    // If this map is fully new, clear any other components on the screen.
-    if (cells.length !== this.occupancyGrid.mapCells.length) {
-      this.clearPath();
-      this.clearClickedCell();
-    }
-
-    this.occupancyGrid.updateCells(cells);
-  }
-
-  drawLasers(ranges, thetas, color = "green", line_width = 0.5) {
+  drawLasers(ranges, thetas, color = "green", line_width = 1) {
     this.laserGraphics.clear();
-    this.laserGraphics.beginPath();
-    for (var i = 0; i < ranges.length; i++) {
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      if (!Number.isFinite(r)) continue;
       this.laserGraphics.moveTo(0, 0);
-      let rayX = ranges[i] * Math.cos(thetas[i]) * this.pixelsPerMeter;
-      let rayY = -ranges[i] * Math.sin(thetas[i]) * this.pixelsPerMeter;
-      this.laserGraphics.lineTo(rayX, rayY);
+      this.laserGraphics.lineTo(r * Math.cos(thetas[i]), r * Math.sin(thetas[i]));
     }
-
-    this.laserGraphics.stroke({ width: line_width, color: color });
+    this.laserGraphics.stroke({ width: line_width, color: color, pixelLine: line_width <= 1 });
   }
 
   clearLasers() {
     if (this.laserGraphics) this.laserGraphics.clear();
   }
 
-  drawPath(path, color = "rgb(255, 25, 25)", line_width = 0.5) {
+  drawPath(path, color = config.PATH_COLOUR, line_width = 2) {
     this.pathGraphics.clear();
-    if (path.length === 0) return;  // Don't draw if the path is empty.
+    this.lastPath = path;
+    if (path.length === 0) return;
 
-    this.pathGraphics.beginPath();
-    let current = this.posToPixels(path[0][0], path[0][1]);
-    this.pathGraphics.moveTo(current[0], current[1]);
-    for(let i = 1; i < path.length; i++) {
-      // Draws a line between the points
-      current = this.posToPixels(path[i][0], path[i][1]);
-      this.pathGraphics.lineTo(current[0], current[1]);
+    this.pathGraphics.moveTo(path[0][0], path[0][1]);
+    for (let i = 1; i < path.length; i++) {
+      this.pathGraphics.lineTo(path[i][0], path[i][1]);
     }
-    this.pathGraphics.stroke({ width: line_width, color: color });
+    this.pathGraphics.stroke({ width: this.pxToM(line_width), color: color });
   }
 
   clearPath() {
-    this.pathGraphics.clear();
+    this.lastPath = null;
+    if (this.pathGraphics) this.pathGraphics.clear();
   }
 
-  drawParticles(particles, color = 0xff0000, size = 1){
+  // Particles are given in world coordinates; size is in map cells.
+  drawParticles(particles, color = 0xff0000, size = 1) {
     this.particlesGraphics.clear();
+    const radius = size * this.occupancyGrid.metersPerCell;
     for (let i = 0; i < particles.length; i++) {
-      let pt = this.posToPixels(particles[i][0], particles[i][1])
-      this.particlesGraphics.circle(pt[0], pt[1], size * this.pixPerCell).fill(color)
+      this.particlesGraphics.circle(particles[i][0], particles[i][1], radius);
     }
+    this.particlesGraphics.fill(color);
   }
 
   clearParticles() {
-    this.particlesGraphics.clear();
+    if (this.particlesGraphics) this.particlesGraphics.clear();
   }
 
-  drawClickedCell(u, v) {
-    const cell = this.pixelsToCell(u, v);
-    let pos = this.cellToPixels(cell[0], cell[1]);
-
-    this.clickedCellGraphics.clear()
-    this.clickedCellGraphics.rect(pos[0], pos[1], this.pixPerCell, this.pixPerCell).fill(0xff8300);
+  drawClickedCell(x, y) {
+    this.clickedCellGraphics.clear();
+    if (!this.isMapLoaded()) return;
+    const [r, c] = this.posToCell(x, y);
+    const [cx, cy] = this.occupancyGrid.cellToPos(r, c);
+    const m = this.occupancyGrid.metersPerCell;
+    this.clickedCellGraphics.rect(cx, cy, m, m).fill(0xff8300);
+    this.clickedPos = [x, y];
   }
 
   clearClickedCell() {
     this.clickedCellGraphics.clear();
+    this.clickedPos = null;
     this.clickCallback([]);
   }
 }
